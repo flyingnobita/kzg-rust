@@ -1,23 +1,23 @@
-use std::ops::Mul;
-use ark_ff::Field;
+use crate::utils::{div, evaluate, interpolate, mul};
 use ark_ec::pairing::Pairing;
-use crate::utils::{div, mul, evaluate, interpolate};
+use ark_ff::Field;
+use std::ops::Mul;
 
 pub struct KZG<E: Pairing> {
-    pub g1: E::G1,
-    pub g2: E::G2,
-    pub g2_tau: E::G2,
+    pub g1: E::G1Affine,
+    pub g2: E::G2Affine,
+    pub g2_tau: E::G2Affine,
     pub degree: usize,
-    pub crs_g1: Vec<E::G1>,
-    pub crs_g2: Vec<E::G2>,
+    pub crs_g1: Vec<E::G1Affine>,
+    pub crs_g2: Vec<E::G2Affine>,
 }
 
-impl <E:Pairing> KZG<E> {
-    pub fn new(g1: E::G1, g2: E::G2, degree: usize) -> Self {
+impl<E: Pairing> KZG<E> {
+    pub fn new(g1: E::G1Affine, g2: E::G2Affine, degree: usize) -> Self {
         Self {
             g1,
             g2,
-            g2_tau: g2.mul(E::ScalarField::ZERO),
+            g2_tau: g2.mul(E::ScalarField::ZERO).into(),
             degree,
             crs_g1: vec![],
             crs_g2: vec![],
@@ -25,22 +25,24 @@ impl <E:Pairing> KZG<E> {
     }
 
     pub fn setup(&mut self, secret: E::ScalarField) {
-        for i in 0..self.degree+1 {
-            self.crs_g1.push(self.g1.mul(secret.pow(&[i as u64])));
-            self.crs_g2.push(self.g2.mul(secret.pow(&[i as u64])));
+        for i in 0..self.degree + 1 {
+            self.crs_g1
+                .push(self.g1.mul(secret.pow(&[i as u64])).into());
+            self.crs_g2
+                .push(self.g2.mul(secret.pow(&[i as u64])).into());
         }
-        self.g2_tau = self.g2.mul(secret);
+        self.g2_tau = self.g2.mul(secret).into();
     }
 
-    pub fn commit(&self, poly: &[E::ScalarField]) -> E::G1 {
+    pub fn commit(&self, poly: &[E::ScalarField]) -> E::G1Affine {
         let mut commitment = self.g1.mul(E::ScalarField::ZERO);
-        for i in 0..self.degree+1 {
+        for i in 0..self.degree + 1 {
             commitment += self.crs_g1[i] * poly[i];
         }
-        commitment
+        commitment.into()
     }
 
-    pub fn open(&self, poly: &[E::ScalarField], point: E::ScalarField) -> E::G1 {
+    pub fn open(&self, poly: &[E::ScalarField], point: E::ScalarField) -> E::G1Affine {
         // evaluate the polynomial at point
         let value = evaluate(poly, point);
 
@@ -50,7 +52,8 @@ impl <E:Pairing> KZG<E> {
         // initialize numerator
         let first = poly[0] - value;
         let rest = &poly[1..];
-        let temp: Vec<E::ScalarField> = std::iter::once(first).chain(rest.iter().cloned()).collect();
+        let temp: Vec<E::ScalarField> =
+            std::iter::once(first).chain(rest.iter().cloned()).collect();
         let numerator: &[E::ScalarField] = &temp;
 
         // get quotient by dividing numerator by denominator
@@ -63,10 +66,10 @@ impl <E:Pairing> KZG<E> {
         }
 
         // return pi
-        pi
+        pi.into()
     }
 
-    pub fn multi_open(&self, poly: &[E::ScalarField], points: &[E::ScalarField]) -> E::G1 {
+    pub fn multi_open(&self, poly: &[E::ScalarField], points: &[E::ScalarField]) -> E::G1Affine {
         // denominator is a polynomial where all its root are points to be evaluated (zero poly)
         let mut zero_poly = vec![-points[0], E::ScalarField::ONE];
         for i in 1..points.len() {
@@ -97,18 +100,23 @@ impl <E:Pairing> KZG<E> {
         }
 
         // return pi
-        pi
+        pi.into()
     }
 
     pub fn verify(
         &self,
         point: E::ScalarField,
         value: E::ScalarField,
-        commitment: E::G1,
-        pi: E::G1
+        commitment: E::G1Affine,
+        pi: E::G1Affine,
     ) -> bool {
-        let lhs = E::pairing(pi, self.g2_tau - self.g2.mul(point));
-        let rhs = E::pairing(commitment - self.g1.mul(value), self.g2);
+        let l1: E::G2 = self.g2_tau.into();
+        let l2: E::G2 = self.g2.mul(point).into().into();
+        let lhs = E::pairing(pi, l1 - l2);
+
+        let r1: E::G1 = commitment.into();
+        let r2: E::G1 = self.g1.mul(value);
+        let rhs = E::pairing(r1 - r2, self.g2);
         lhs == rhs
     }
 
@@ -116,8 +124,8 @@ impl <E:Pairing> KZG<E> {
         &self,
         points: &[E::ScalarField],
         values: &[E::ScalarField],
-        commitment: E::G1,
-        pi: E::G1
+        commitment: E::G1Affine,
+        pi: E::G1Affine,
     ) -> bool {
         // compute the zero polynomial
         let mut zero_poly = vec![-points[0], E::ScalarField::ONE];
@@ -141,7 +149,10 @@ impl <E:Pairing> KZG<E> {
         }
 
         let lhs = E::pairing(pi, zero_commitment);
-        let rhs = E::pairing(commitment - lagrange_commitment, self.g2);
+
+        let r1: E::G1 = commitment.into();
+        let r2: E::G1 = lagrange_commitment;
+        let rhs = E::pairing(r1 - r2, self.g2);
         lhs == rhs
     }
 }
